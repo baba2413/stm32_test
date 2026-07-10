@@ -22,6 +22,8 @@
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
 #include "stdio.h"
+#include "stm32f1xx_hal_can.h"
+#include <stdint.h>
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -62,27 +64,32 @@ static void MX_USART2_UART_Init(void);
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
-float MA732_get_rad(){
-    HAL_GPIO_WritePin(GPIOA, GPIO_PIN_4, GPIO_PIN_RESET);
-    uint8_t spi_tx_buffer[] = {0,0};
-    uint8_t spi_rx_buffer[2];
-    HAL_SPI_TransmitReceive(&hspi1, (uint8_t*)spi_tx_buffer, (uint8_t *)spi_rx_buffer, 2, 1000);
-    HAL_GPIO_WritePin(GPIOA, GPIO_PIN_4, GPIO_PIN_SET);
-    const uint16_t raw_data = ((uint16_t)spi_rx_buffer[1] << 8) | spi_rx_buffer[0];
-    float angle_scale_factor = 0.00038349519824f;   // 2π / 16384 (14-bit)
-    float angle_raw = (float)(raw_data >> 2) * angle_scale_factor;
-    return angle_raw;
+uint16_t MA732_get_raw_rad(){
+  HAL_GPIO_WritePin(GPIOA, GPIO_PIN_4, GPIO_PIN_RESET);
+  uint8_t spi_tx_buffer[] = {0,0};
+  uint8_t spi_rx_buffer[2];
+  HAL_SPI_TransmitReceive(&hspi1, (uint8_t*)spi_tx_buffer, (uint8_t *)spi_rx_buffer, 2, 1000);
+  HAL_GPIO_WritePin(GPIOA, GPIO_PIN_4, GPIO_PIN_SET);
+  const uint16_t raw_data = ((uint16_t)spi_rx_buffer[1] << 8) | spi_rx_buffer[0];
+  return raw_data;
+}
+
+float MA732_get_float_rad(){
+  const uint16_t raw_rad = MA732_get_raw_rad();
+  float angle_scale_factor = 0.00038349519824f;   // 2π / 16384 (14-bit)
+  float angle_raw = (float)(raw_rad >> 2) * angle_scale_factor;
+  return angle_raw;
 }
 
 int float_print(float value, char *out_str)
 {
-    char sign = (value < 0) ? '-' : ' ';
-    float abs_rad = (value < 0) ? -value : value;
+  char sign = (value < 0) ? '-' : ' ';
+  float abs_rad = (value < 0) ? -value : value;
 
-    int integer_part = (int)abs_rad; 
-    int fractional_part = (int)((abs_rad - (float)integer_part) * 1000.0f);
+  int integer_part = (int)abs_rad; 
+  int fractional_part = (int)((abs_rad - (float)integer_part) * 1000.0f);
 
-    return sprintf(out_str, "%c%d.%03d", sign, integer_part, fractional_part);
+  return sprintf(out_str, "%c%d.%03d", sign, integer_part, fractional_part);
 }
 
 /* USER CODE END 0 */
@@ -120,24 +127,54 @@ int main(void)
   MX_SPI1_Init();
   MX_USART2_UART_Init();
   /* USER CODE BEGIN 2 */
+  CAN_TxHeaderTypeDef TxHeader;
+  uint8_t TxData[8];
+  uint32_t TxMailbox;
+
   HAL_CAN_Start(&hcan);
+
+  TxHeader.ExtId = 0;
+  TxHeader.RTR = CAN_RTR_DATA;
+  TxHeader.IDE = CAN_ID_EXT;
+  TxHeader.DLC = 8;
   /* USER CODE END 2 */
 
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
   while (1)
   {
-    float rad = MA732_get_rad();
+    float rad = MA732_get_float_rad();
     char rad_str[10];
     float_print(rad, rad_str);
     char uart_buf[50];
     // int msg_len = sprintf(uart_buf, "Motor Angle: %.3f rad\r\n", rad);
     int msg_len = sprintf(uart_buf, "Motor Angle: %s rad\r\n", rad_str);
     HAL_UART_Transmit(&huart2, (uint8_t*)uart_buf, msg_len, 10);
-    // HAL_Delay(1000);
-    HAL_GPIO_TogglePin(INDICATOR_GPIO_Port, INDICATOR_Pin);
-    HAL_Delay(500);
-  
+    // HAL_GPIO_TogglePin(INDICATOR_GPIO_Port, INDICATOR_Pin);
+    // HAL_Delay(500);
+
+    HAL_GPIO_WritePin(INDICATOR_GPIO_Port, INDICATOR_Pin, GPIO_PIN_SET);
+    uint16_t raw_rad = MA732_get_raw_rad();
+
+    TxData[0] = 0x00;
+    TxData[1] = 0x00;
+    TxData[2] = 0x00;
+    TxData[3] = 0x00;
+    TxData[4] = 0x00;
+    TxData[5] = 0x00;
+    TxData[6] = (raw_rad >> 8) & 0xFF;
+    TxData[7] = raw_rad & 0xFF;
+
+    if (HAL_CAN_AddTxMessage(&hcan, &TxHeader, TxData, &TxMailbox)==HAL_OK){
+      int msg_len = sprintf(uart_buf, "CAN is sent. CAN: [ID:%08X] [DATA:%02X %02X %02X %02X %02X %02X %02X %02X]\r\n", 
+                                  TxHeader.ExtId,
+                                  TxData[0], TxData[1], TxData[2], TxData[3], 
+                                  TxData[4], TxData[5], TxData[6], TxData[7]);
+      HAL_UART_Transmit(&huart2, (uint8_t*)uart_buf, msg_len, 10);
+    }
+
+    HAL_Delay(1000);
+
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
@@ -199,10 +236,10 @@ static void MX_CAN_Init(void)
 
   /* USER CODE END CAN_Init 1 */
   hcan.Instance = CAN1;
-  hcan.Init.Prescaler = 16;
+  hcan.Init.Prescaler = 8;
   hcan.Init.Mode = CAN_MODE_NORMAL;
   hcan.Init.SyncJumpWidth = CAN_SJW_1TQ;
-  hcan.Init.TimeSeg1 = CAN_BS1_1TQ;
+  hcan.Init.TimeSeg1 = CAN_BS1_2TQ;
   hcan.Init.TimeSeg2 = CAN_BS2_1TQ;
   hcan.Init.TimeTriggeredMode = DISABLE;
   hcan.Init.AutoBusOff = DISABLE;
